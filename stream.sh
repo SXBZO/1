@@ -3,7 +3,7 @@ set +m
 
 # ═══════════════════════════════════════════════════
 #  SXB Broadcast — Kick → Restream
-#  شاشة انتظار متحركة احترافية (بدون drawbox)
+#  شاشة انتظار متحركة احترافية
 # ═══════════════════════════════════════════════════
 
 # ─── الإعدادات ───
@@ -251,7 +251,7 @@ start_producer_standby() {
 # ═══════════════════════════════════════════════════
 start_producer_live() {
     local M3U8="$1"
-    echo "🔴 تشغيل منتج مباشر..."
+    echo "🔴 منتج مباشر: SXB"
     ffmpeg -y -hide_banner -loglevel warning -nostdin \
         -headers "User-Agent: $UA" \
         -reconnect 1 -reconnect_at_eof 1 -reconnect_streamed 1 \
@@ -267,7 +267,7 @@ start_producer_live() {
 }
 
 # ═══════════════════════════════════════════════════
-#  المخرج (إعادة ترميز لمنع انهيار mpegts)
+#  المخرج — Bitrate محسّن 6500k
 # ═══════════════════════════════════════════════════
 start_output() {
     echo "🔗 الاتصال بـ Restream..."
@@ -276,7 +276,8 @@ start_output() {
         -f mpegts -i "$FIFO" \
         -c:v libx264 -preset ultrafast -tune zerolatency \
         -pix_fmt yuv420p -g $GOP -r $FPS \
-        -c:a aac -b:a 128k -ar 44100 -ac 2 \
+        -b:v 6500k -maxrate 7000k -bufsize 14000k \
+        -c:a aac -b:a 160k -ar 44100 -ac 2 \
         -max_muxing_queue_size 4096 \
         -flvflags no_duration_filesize \
         -f flv "$RESTREAM_URL" >/tmp/out.log 2>&1 &
