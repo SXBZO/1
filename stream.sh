@@ -61,6 +61,7 @@ echo "🎬 القناة: $STREAMER"
 # ═══════════════════════════════════════════════════
 #  توليد صورة شاشة الانتظار
 # ═══════════════════════════════════════════════════
+
 cat > /tmp/make_standby.py <<PYEOF
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 import urllib.request, io
@@ -222,24 +223,154 @@ bg = Image.alpha_composite(bg, texts)
 
 # ─── 5) الشعار (خلفية شفافة، مدموج) ───
 try:
+cat > /tmp/make_standby.py <<PYEOF
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
+import urllib.request, io
+
+W, H = 1920, 1080
+FONT_AR = "$FONT_AR"
+FONT_EN = "$FONT_EN"
+TITLE = "$TITLE_AR"
+SUBTITLE = "$SUBTITLE_AR"
+STREAMER_LABEL = "$STREAMER_LABEL"
+C_TITLE = "$COLOR_TITLE"
+C_SUB = "$COLOR_SUB"
+C_STREAMER = "$COLOR_STREAMER"
+FS_TITLE = $FONT_SIZE_TITLE
+FS_SUB = $FONT_SIZE_SUB
+FS_STREAMER = $FONT_SIZE_STREAMER
+Y_TITLE = $Y_TITLE
+Y_SUB = $Y_SUB
+Y_STREAMER = $Y_STREAMER
+BG_TOP = ($BG_TOP_R, $BG_TOP_G, $BG_TOP_B)
+BG_BOT = ($BG_BOT_R, $BG_BOT_G, $BG_BOT_B)
+GLOW = ($GLOW_R, $GLOW_G, $GLOW_B, 70)
+LOGO_URL = "$LOGO_URL"
+LOGO_W = $LOGO_W
+LOGO_BOTTOM = $LOGO_BOTTOM
+
+def load_font(path, size, weight=700):
+    font = ImageFont.truetype(path, size)
+    try:
+        axes = font.get_variation_axes()
+        if len(axes) == 1:
+            font.set_variation_by_axes([weight])
+        elif len(axes) == 2:
+            font.set_variation_by_axes([0, weight])
+        elif len(axes) == 3:
+            font.set_variation_by_axes([0, weight, 0])
+    except Exception:
+        pass
+    return font
+
+# ═══ 1) الخلفية ═══
+bg = Image.new("RGB", (W, H))
+d = ImageDraw.Draw(bg)
+for y in range(H):
+    t = y / H
+    r = int(BG_TOP[0] + (BG_BOT[0] - BG_TOP[0]) * t)
+    g = int(BG_TOP[1] + (BG_BOT[1] - BG_TOP[1]) * t)
+    b = int(BG_TOP[2] + (BG_BOT[2] - BG_TOP[2]) * t)
+    d.line([(0, y), (W, y)], fill=(r, g, b))
+bg = bg.convert("RGBA")
+
+# توهج مركزي
+glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+gd = ImageDraw.Draw(glow)
+gd.ellipse([W//2 - 800, H//2 - 600, W//2 + 800, H//2 + 600], fill=GLOW)
+glow = glow.filter(ImageFilter.GaussianBlur(300))
+bg = Image.alpha_composite(bg, glow)
+
+# نمط ماس أسفل
+pattern = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+pd = ImageDraw.Draw(pattern)
+size = 80
+start_y = H - 280
+row = 0
+y = start_y
+while y < H + size:
+    x = (size // 2) if row % 2 else 0
+    while x < W + size:
+        pts = [(x, y - size//2), (x + size//2, y), (x, y + size//2), (x - size//2, y)]
+        pd.polygon(pts, outline=(0, 0, 0, 200), width=2)
+        x += size
+    y += size // 2
+    row += 1
+mask = Image.new("L", (W, H), 0)
+md = ImageDraw.Draw(mask)
+for yy in range(start_y, H):
+    a = min(255, int((yy - start_y) / 0.7))
+    md.line([(0, yy), (W, yy)], fill=a)
+pattern.putalpha(mask)
+bg = Image.alpha_composite(bg, pattern)
+bg.convert("RGB").save("/tmp/sxb_bg.png", "PNG")
+print("✅ bg")
+
+# ═══ 2) دالة رسم نص مع توهج (PNG شفاف) ═══
+def make_text_png(text, font, color, out, direction="rtl"):
+    c = color.lstrip("#")
+    r, g, b = tuple(int(c[i:i+2], 16) for i in (0, 2, 4))
+
+    tmp = Image.new("RGBA", (10, 10), (0, 0, 0, 0))
+    td = ImageDraw.Draw(tmp)
+    bbox = td.textbbox((0, 0), text, font=font, direction=direction)
+    tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
+    pad = 80
+    Wn = tw + pad * 2
+    Hn = th + pad * 2
+
+    # توهج
+    glow = Image.new("RGBA", (Wn, Hn), (0, 0, 0, 0))
+    gd = ImageDraw.Draw(glow)
+    gx = pad - bbox[0]
+    gy = pad - bbox[1]
+    for radius, alpha in [(40, 90), (25, 140), (12, 200)]:
+        t = Image.new("RGBA", (Wn, Hn), (0, 0, 0, 0))
+        tdd = ImageDraw.Draw(t)
+        tdd.text((gx, gy), text, font=font, fill=(r, g, b, alpha), direction=direction)
+        t = t.filter(ImageFilter.GaussianBlur(radius))
+        glow = Image.alpha_composite(glow, t)
+
+    # حد أسود
+    outline = Image.new("RGBA", (Wn, Hn), (0, 0, 0, 0))
+    od = ImageDraw.Draw(outline)
+    ow = max(3, int(font.size / 22))
+    for dx in range(-ow, ow + 1):
+        for dy in range(-ow, ow + 1):
+            if dx*dx + dy*dy <= ow*ow:
+                od.text((gx+dx, gy+dy), text, font=font, fill=(0, 0, 0, 255), direction=direction)
+
+    # النص
+    txt = Image.new("RGBA", (Wn, Hn), (0, 0, 0, 0))
+    td2 = ImageDraw.Draw(txt)
+    td2.text((gx, gy), text, font=font, fill=(r, g, b, 255), direction=direction)
+
+    final = Image.alpha_composite(glow, outline)
+    final = Image.alpha_composite(final, txt)
+    final.save(out, "PNG")
+    print(f"✅ {out}")
+
+# ═══ 3) توليد النصوص ═══
+font_title = load_font(FONT_AR, FS_TITLE, 900)
+font_sub = load_font(FONT_AR, FS_SUB, 700)
+font_str = load_font(FONT_EN, FS_STREAMER, 700)
+
+make_text_png(TITLE, font_title, C_TITLE, "/tmp/sxb_title.png", "rtl")
+make_text_png(SUBTITLE, font_sub, C_SUB, "/tmp/sxb_sub.png", "rtl")
+make_text_png(STREAMER_LABEL, font_str, C_STREAMER, "/tmp/sxb_streamer.png", "ltr")
+
+# ═══ 4) الشعار بخلفية شفافة ═══
+try:
     req = urllib.request.Request(LOGO_URL, headers={"User-Agent": "Mozilla/5.0"})
     logo_data = urllib.request.urlopen(req, timeout=25).read()
     logo = Image.open(io.BytesIO(logo_data)).convert("RGBA")
-    # تصغير مع الحفاظ على النسبة
     ratio = LOGO_W / logo.width
     logo = logo.resize((LOGO_W, int(logo.height * ratio)), Image.LANCZOS)
-    # موضع أسفل الوسط
-    lx = (W - logo.width) // 2
-    ly = H - logo.height - LOGO_BOTTOM
-    # دمج الشعار مع الحفاظ على الشفافية
-    bg.alpha_composite(logo, (lx, ly))
-    print(f"✅ الشعار مدموج: {logo.width}x{logo.height}")
+    logo.save("/tmp/sxb_logo.png", "PNG")
+    print(f"✅ logo {logo.width}x{logo.height}")
 except Exception as e:
-    print(f"⚠️ فشل الشعار: {e}")
-
-# ─── حفظ ───
-bg.convert("RGB").save("/tmp/standby.png", "PNG", optimize=True)
-print("✅ standby.png جاهز")
+    print(f"⚠️ logo fail: {e}")
 PYEOF
 
 echo "🎨 توليد شاشة الانتظار..."
@@ -257,12 +388,39 @@ exec 3<>"$FIFO"
 #  منتج شاشة الانتظار
 # ═══════════════════════════════════════════════════
 start_producer_standby() {
+    echo "⏳ تشغيل الشاشة المتحركة..."
     ffmpeg -y -hide_banner -loglevel warning -nostdin \
-        -loop 1 -framerate $FPS -i /tmp/standby.png \
+        -loop 1 -framerate $FPS -i /tmp/sxb_bg.png \
+        -loop 1 -framerate $FPS -i /tmp/sxb_title.png \
+        -loop 1 -framerate $FPS -i /tmp/sxb_sub.png \
+        -loop 1 -framerate $FPS -i /tmp/sxb_streamer.png \
+        -loop 1 -framerate $FPS -i /tmp/sxb_logo.png \
         -f lavfi -i "anullsrc=r=44100:cl=stereo" \
-        -map 0:v:0 -map 1:a:0 \
-        -c:v libx264 -preset ultrafast -tune zerolatency -pix_fmt yuv420p \
-        -r $FPS -g $GOP \
+        -filter_complex "
+            [0:v]format=rgba[bg];
+
+            [1:v]format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='alpha(X,Y)*(0.75+0.25*sin(2*PI*t/2.5))'[title];
+            [bg][title]overlay=x=(W-w)/2:y=$Y_TITLE[v1];
+
+            [2:v]format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='alpha(X,Y)*(0.85+0.15*sin(2*PI*t/3.5+1))'[sub];
+            [v1][sub]overlay=x=(W-w)/2:y=$Y_SUB[v2];
+
+            [3:v]format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='alpha(X,Y)*(0.85+0.15*sin(2*PI*t/4+2))'[str];
+            [v2][str]overlay=x=(W-w)/2:y=$Y_STREAMER[v3];
+
+            [4:v]format=rgba,scale='$LOGO_W*(1+0.05*sin(2*PI*t/3.5))':-1:eval=frame[logo_scaled];
+            [4:v]format=rgba[logo_orig];
+
+            [v3][logo_orig]overlay=x=(W-w)/2:y=H-h-$LOGO_BOTTOM:enable='lt(mod(t\,$LOGO_CYCLE)\,1)'[vL1];
+            [vL1][logo_scaled]overlay=x=(W-w)/2:y=H-h-$LOGO_BOTTOM:enable='between(mod(t\,$LOGO_CYCLE)\,1\,$LOGO_SHOW)'[v4];
+
+            [v4]drawbox=x=0:y='mod(t*120\,H)':w=W:h=2:color=white@0.12:t=fill[v5];
+
+            [v5]eq=brightness='0.015*sin(2*PI*t/4)':eval=frame[vout]
+        " \
+        -map "[vout]" -map 5:a:0 \
+        -c:v libx264 -preset ultrafast -tune zerolatency \
+        -pix_fmt yuv420p -r $FPS -g $GOP \
         -c:a aac -b:a 128k -ar 44100 -ac 2 \
         -max_muxing_queue_size 4096 \
         -f mpegts "$FIFO" >/tmp/prod.log 2>&1 &
