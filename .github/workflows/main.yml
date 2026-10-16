@@ -1,0 +1,81 @@
+name: SXB 24-7 Broadcast
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *'
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  broadcast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+
+    steps:
+      - name: جلب الملفات
+        uses: actions/checkout@v3
+
+      - name: تخزين مؤقت للـ pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-sxb-v1
+
+      - name: تثبيت FFmpeg والخطوط والمكتبات
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ffmpeg fontconfig
+          pip3 install --user --break-system-packages --quiet --upgrade Pillow streamlink
+
+          echo "🔤 تحميل الخطوط..."
+          mkdir -p ~/.fonts
+
+          for URL in \
+            "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/cairo/Cairo%5Bslnt%2Cwght%5D.ttf" \
+            "https://raw.githubusercontent.com/google/fonts/main/ofl/cairo/Cairo%5Bslnt%2Cwght%5D.ttf"; do
+            curl -sL --max-time 30 "$URL" -o ~/.fonts/Cairo-var.ttf 2>/dev/null || true
+            [ "$(stat -c%s ~/.fonts/Cairo-var.ttf 2>/dev/null || echo 0)" -gt 50000 ] && break
+            rm -f ~/.fonts/Cairo-var.ttf
+          done
+
+          for URL in \
+            "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/orbitron/Orbitron%5Bwght%5D.ttf" \
+            "https://raw.githubusercontent.com/google/fonts/main/ofl/orbitron/Orbitron%5Bwght%5D.ttf"; do
+            curl -sL --max-time 30 "$URL" -o ~/.fonts/Orbitron-var.ttf 2>/dev/null || true
+            [ "$(stat -c%s ~/.fonts/Orbitron-var.ttf 2>/dev/null || echo 0)" -gt 20000 ] && break
+            rm -f ~/.fonts/Orbitron-var.ttf
+          done
+
+          fc-cache -f >/dev/null 2>&1
+          echo "✅ الخطوط جاهزة"
+
+      - name: إضافة ~/.local/bin إلى PATH
+        run: echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: التحقق
+        run: |
+          ffmpeg -version | head -1
+          streamlink --version
+
+      - name: جدولة الرن التالي (بعد 5س30د)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          setsid nohup bash -c "
+            sleep 19800
+            gh workflow run main.yml --ref '${{ github.ref_name }}'
+          " >/tmp/sched.log 2>&1 < /dev/null &
+          echo "✅ جدولة الرن التالي"
+
+      - name: تشغيل البث
+        env:
+          RESTREAM_KEY: 're_12552561_event81737fba9ada4713ab13ad7e04a36880'
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: |
+          chmod +x stream.sh
+          ./stream.sh
