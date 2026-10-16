@@ -3,7 +3,7 @@ set +m
 
 # ═══════════════════════════════════════════════════
 #  SXB Broadcast — Kick → Restream
-#  شاشة انتظار متحركة احترافية
+#  شاشة انتظار متحركة احترافية (بدون drawbox)
 # ═══════════════════════════════════════════════════
 
 # ─── الإعدادات ───
@@ -59,7 +59,7 @@ echo "🔤 الخطوط: عربي=$FONT_AR | إنجليزي=$FONT_EN"
 echo "🎬 القناة: $STREAMER"
 
 # ═══════════════════════════════════════════════════
-#  توليد صور الشاشة المتحركة (5 ملفات PNG منفصلة)
+#  توليد صور الشاشة
 # ═══════════════════════════════════════════════════
 cat > /tmp/make_standby.py <<PYEOF
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
@@ -109,14 +109,12 @@ for y in range(H):
     d.line([(0, y), (W, y)], fill=(r, g, b))
 bg = bg.convert("RGBA")
 
-# توهج مركزي
 glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
 gd = ImageDraw.Draw(glow)
 gd.ellipse([W//2 - 800, H//2 - 600, W//2 + 800, H//2 + 600], fill=GLOW)
 glow = glow.filter(ImageFilter.GaussianBlur(300))
 bg = Image.alpha_composite(bg, glow)
 
-# نمط ماس أسفل
 pattern = Image.new("RGBA", (W, H), (0, 0, 0, 0))
 pd = ImageDraw.Draw(pattern)
 size = 80
@@ -141,7 +139,7 @@ bg = Image.alpha_composite(bg, pattern)
 bg.convert("RGB").save("/tmp/sxb/bg.png", "PNG")
 print("✅ bg.png")
 
-# ═══ 2) دالة رسم نص مع توهج كـ PNG شفاف ═══
+# ═══ 2) دالة رسم نص مع توهج ═══
 def make_text_png(text, font, color, out, direction="rtl"):
     c = color.lstrip("#")
     r, g, b = tuple(int(c[i:i+2], 16) for i in (0, 2, 4))
@@ -190,7 +188,7 @@ make_text_png(TITLE, font_title, C_TITLE, "/tmp/sxb/title.png", "rtl")
 make_text_png(SUBTITLE, font_sub, C_SUB, "/tmp/sxb/sub.png", "rtl")
 make_text_png(STREAMER_LABEL, font_str, C_STREAMER, "/tmp/sxb/streamer.png", "ltr")
 
-# ═══ 3) الشعار بخلفية شفافة ═══
+# ═══ 3) الشعار ═══
 try:
     req = urllib.request.Request(LOGO_URL, headers={"User-Agent": "Mozilla/5.0"})
     logo_data = urllib.request.urlopen(req, timeout=25).read()
@@ -201,7 +199,6 @@ try:
     print(f"✅ logo.png {logo.width}x{logo.height}")
 except Exception as e:
     print(f"⚠️ logo fail: {e}")
-    # placeholder شفاف
     ph = Image.new("RGBA", (LOGO_W, LOGO_W), (0, 0, 0, 0))
     ph.save("/tmp/sxb/logo.png", "PNG")
 PYEOF
@@ -231,18 +228,15 @@ start_producer_standby() {
         -f lavfi -i "anullsrc=r=44100:cl=stereo" \
         -filter_complex "\
 [0:v]format=rgba[bg];\
-[1:v]format=rgba,colorchannelmixer=aa=0.82[title];\
+[1:v]format=rgba[title];\
 [bg][title]overlay=x=(W-w)/2:y=$Y_TITLE[v1];\
-[2:v]format=rgba,colorchannelmixer=aa=0.88[sub];\
+[2:v]format=rgba[sub];\
 [v1][sub]overlay=x=(W-w)/2:y=$Y_SUB[v2];\
-[3:v]format=rgba,colorchannelmixer=aa=0.9[str];\
+[3:v]format=rgba[str];\
 [v2][str]overlay=x=(W-w)/2:y=$Y_STREAMER[v3];\
 [4:v]format=rgba,scale='$LOGO_W*(1+0.06*sin(2*PI*t/3.5))':-1:eval=frame[logo_big];\
-[4:v]format=rgba[logo_norm];\
-[v3][logo_norm]overlay=x=(W-w)/2:y=H-h-$LOGO_BOTTOM:enable='lt(mod(t\,$LOGO_CYCLE)\,0.5)'[vL1];\
-[vL1][logo_big]overlay=x=(W-w)/2:y=H-h-$LOGO_BOTTOM:enable='between(mod(t\,$LOGO_CYCLE)\,0.5\,$LOGO_SHOW)'[vL2];\
-[vL2]drawbox=x=0:y='mod(t*180\,H)':w=W:h=3:color=white@0.15:t=fill[vL3];\
-[vL3]eq=brightness='0.02*sin(2*PI*t/5)':eval=frame[vout]" \
+[v3][logo_big]overlay=x=(W-w)/2:y=H-h-$LOGO_BOTTOM:enable='between(mod(t\,$LOGO_CYCLE)\,0.3\,$LOGO_SHOW)'[v4];\
+[v4]eq=brightness='0.02*sin(2*PI*t/5)':eval=frame[vout]" \
         -map "[vout]" -map 5:a:0 \
         -c:v libx264 -preset ultrafast -tune zerolatency \
         -pix_fmt yuv420p -r $FPS -g $GOP \
@@ -328,7 +322,6 @@ MODE="STANDBY"
 TICK=0
 
 while true; do
-    # فحص حياة المخرج
     if ! kill -0 "$OUT" 2>/dev/null; then
         echo "⚠️ المخرج مات — إعادة..."
         kill_producer
@@ -338,7 +331,6 @@ while true; do
         continue
     fi
 
-    # فحص حياة المنتج
     if ! kill -0 "$PROD" 2>/dev/null; then
         echo "⚠️ المنتج مات — إعادة..."
         if [ "$MODE" = "LIVE" ]; then
@@ -358,7 +350,6 @@ while true; do
         continue
     fi
 
-    # فحص SXB
     URL=$(timeout 20 streamlink --http-header "User-Agent=$UA" \
           --stream-timeout 15 "https://kick.com/$STREAMER" best \
           --stream-url 2>/dev/null | grep -m1 "^http")
