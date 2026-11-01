@@ -1,4 +1,4 @@
-name: SXB 24-7 Broadcast
+name: SXB Absolute 24-7 Broadcast
 
 on:
   workflow_dispatch:
@@ -9,6 +9,10 @@ permissions:
   actions: write
   contents: read
 
+concurrency:
+  group: sxb-broadcast
+  cancel-in-progress: true
+
 jobs:
   broadcast:
     runs-on: ubuntu-latest
@@ -16,50 +20,33 @@ jobs:
 
     steps:
       - name: جلب الملفات
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: تخزين مؤقت للـ pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-sxb-v1
-
-      - name: تثبيت FFmpeg والخطوط والمكتبات
+      - name: تثبيت الأدوات والخطوط
         run: |
           set -e
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
           sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ffmpeg fontconfig
+          timeout 300 sudo apt-get install -y --no-install-recommends ffmpeg fontconfig libraqm0 libfribidi0
           pip3 install --user --break-system-packages --quiet --upgrade Pillow streamlink
-
-          echo "🔤 تحميل الخطوط..."
+          
           mkdir -p ~/.fonts
-
           for URL in \
             "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/cairo/Cairo%5Bslnt%2Cwght%5D.ttf" \
             "https://raw.githubusercontent.com/google/fonts/main/ofl/cairo/Cairo%5Bslnt%2Cwght%5D.ttf"; do
             curl -sL --max-time 30 "$URL" -o ~/.fonts/Cairo-var.ttf 2>/dev/null || true
             [ "$(stat -c%s ~/.fonts/Cairo-var.ttf 2>/dev/null || echo 0)" -gt 50000 ] && break
-            rm -f ~/.fonts/Cairo-var.ttf
           done
-
           for URL in \
             "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/orbitron/Orbitron%5Bwght%5D.ttf" \
             "https://raw.githubusercontent.com/google/fonts/main/ofl/orbitron/Orbitron%5Bwght%5D.ttf"; do
             curl -sL --max-time 30 "$URL" -o ~/.fonts/Orbitron-var.ttf 2>/dev/null || true
             [ "$(stat -c%s ~/.fonts/Orbitron-var.ttf 2>/dev/null || echo 0)" -gt 20000 ] && break
-            rm -f ~/.fonts/Orbitron-var.ttf
           done
-
           fc-cache -f >/dev/null 2>&1
-          echo "✅ الخطوط جاهزة"
 
-      - name: إضافة ~/.local/bin إلى PATH
+      - name: PATH
         run: echo "$HOME/.local/bin" >> $GITHUB_PATH
-
-      - name: التحقق
-        run: |
-          ffmpeg -version | head -1
-          streamlink --version
 
       - name: جدولة الرن التالي (بعد 5س30د)
         env:
@@ -69,7 +56,7 @@ jobs:
             sleep 19800
             gh workflow run main.yml --ref '${{ github.ref_name }}'
           " >/tmp/sched.log 2>&1 < /dev/null &
-          echo "✅ جدولة الرن التالي"
+          echo "✅"
 
       - name: تشغيل البث
         env:
