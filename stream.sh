@@ -1,718 +1,585 @@
-#!/bin/bash
-set +m
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
 
-# ═══════════════════════════════════════════════════
-#  SXB Broadcast — V10 (Persistent FIFO + Watchdog)
-# ═══════════════════════════════════════════════════
+# SXB relay supervisor
+# One persistent RTMP output, one persistent FIFO reader, and one active producer.
+# LIVE is passed through without scaling, frame-rate conversion, or video re-encoding.
+# Only the generated standby slate has a fixed 1080p60 format.
 
-STREAMER="SXB"
-TITLE_AR="توقف البث من شونق"
-SUBTITLE_AR="بث شونق سابثون 30 يوم!"
-LOGO_URL="https://a.top4top.io/p_394102x460.png"
+STREAMER="${STREAMER:-SXB}"
+TITLE_AR="${TITLE_AR:-توقف البث من شونق}"
+SUBTITLE_AR="${SUBTITLE_AR:-جاري الانتظار...}"
+LOGO_URL="${LOGO_URL:-}"
 UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-# ⚠️ المفتاح المباشر (Hardcoded)
-RESTREAM_KEY="${RESTREAM_KEY:-re_12552561_event81737fba9ada4713ab13ad7e04a36880}"
-[ -z "$RESTREAM_KEY" ] && { echo "❌ مفتاح Restream فارغ"; exit 1; }
-
-RESTREAM_URL="rtmp://live.restream.io/live/$RESTREAM_KEY"
-FIFO="/tmp/relay.ts"
-WORKDIR="/tmp/standby_sxb"
-mkdir -p "$WORKDIR"
-
-# 1. توليد شاشة الانتظار (1080p 60FPS)
-if [ ! -f "$WORKDIR/standby.ts" ]; then
-    echo "🎨 تصميم شاشة الانتظار..."
-    cat > /tmp/make_ui.py <<'PYEOF'
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
-import urllib.request, io, os
-
-W, H = 1920, 1080
-WORKDIR = os.environ["WORKDIR"]
-FONT_AR = os.path.expanduser("~/.fonts/Cairo-var.ttf")
-FONT_EN = os.path.expanduser("~/.fonts/Orbitron-var.ttf")
-TITLE = os.environ.get("TITLE_AR", "توقف البث")
-SUBTITLE = os.environ.get("SUBTITLE_AR", "جاري الانتظار...")
-STREAMER = os.environ.get("STREAMER", "SXB")
-LOGO_URL = os.environ.get("LOGO_URL", "")
-
-def load_font(path, size, weight=700):
-    try:
-        font = ImageFont.truetype(path, size)
-        axes = font.get_variation_axes()
-        if len(axes) == 1: font.set_variation_by_axes([weight])
-        elif len(axes) == 2: font.set_variation_by_axes([0, weight])
-        return font
-    except: return ImageFont.load_default()
-
-bg = Image.new("RGB", (W, H))
-d = ImageDraw.Draw(bg)
-for y in range(H):
-    t = y / H
-    d.line([(0, y), (W, y)], fill=(int(30*(1-t)), int(0), int(0)))
-
-glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-gd = ImageDraw.Draw(glow)
-gd.ellipse([W//2 - 600, H//2 - 400, W//2 + 600, H//2 + 400], fill=(255, 0, 0, 80))
-glow = glow.filter(ImageFilter.GaussianBlur(250))
-bg = bg.convert("RGBA")
-bg = Image.alpha_composite(bg, glow)
-
-corner = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-cd = ImageDraw.Draw(corner)
-SIZE = 80
-def draw_corner(cx, cy, fx, fy):
-    cd.line([(cx, cy), (cx + SIZE*fx, cy)], fill=(255, 0, 0, 255), width=4)
-    cd.line([(cx, cy), (cx, cy + SIZE*fy)], fill=(255, 0, 0, 255), width=4)
-draw_corner(40, 40, 1, 1); draw_corner(W-40, 40, -1, 1)
-draw_corner(40, H-40, 1, -1); draw_corner(W-40, H-40, -1, -1)
-bg = Image.alpha_composite(bg, corner)
-
-card_w, card_h = 1200, 600
-card_x, card_y = (W - card_w)//2, (H - card_h)//2
-card = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-cd = ImageDraw.Draw(card)
-cd.rounded_rectangle([(card_x, card_y), (card_x+card_w, card_y+card_h)], radius=20, fill=(20, 0, 0, 150), outline=(255, 0, 0, 100), width=2)
-cd.rounded_rectangle([(card_x+5, card_y+5), (card_x+card_w-5, card_y+card_h-5)], radius=18, outline=(255, 255, 255, 30), width=1)
-bg = Image.alpha_composite(bg, card)
-
-font_title = load_font(FONT_AR, 100, 900)
-font_sub = load_font(FONT_AR, 50, 700)
-font_sxb = load_font(FONT_EN, 150, 900)
-
-t_img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-ImageDraw.Draw(t_img).text((W//2, card_y + 100), TITLE, font=font_title, fill=(255, 255, 255, 255), anchor="mm", direction="rtl")
-bg = Image.alpha_composite(bg, t_img.filter(ImageFilter.GaussianBlur(20)))
-bg = Image.alpha_composite(bg, t_img)
-
-s_img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-ImageDraw.Draw(s_img).text((W//2, card_y + 220), SUBTITLE, font=font_sub, fill=(255, 255, 255, 200), anchor="mm", direction="rtl")
-bg = Image.alpha_composite(bg, s_img)
-
-sxb_img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-ImageDraw.Draw(sxb_img).text((W//2, card_y + 400), STREAMER, font=font_sxb, fill=(255, 0, 0, 255), anchor="mm")
-bg = Image.alpha_composite(bg, sxb_img.filter(ImageFilter.GaussianBlur(40)))
-bg = Image.alpha_composite(bg, sxb_img)
-
-try:
-    req = urllib.request.Request(LOGO_URL, headers={"User-Agent": "Mozilla/5.0"})
-    logo = Image.open(io.BytesIO(urllib.request.urlopen(req, timeout=10).read())).convert("RGBA")
-    logo = logo.resize((150, int(logo.height * (150 / logo.width))), Image.LANCZOS)
-    bg.alpha_composite(logo, ((W - 150)//2, card_y - 90))
-except Exception: pass
-
-bg.convert("RGB").save(f"{WORKDIR}/bg.png")
-PYEOF
-    WORKDIR="$WORKDIR" STREAMER="$STREAMER" TITLE_AR="$TITLE_AR" SUBTITLE_AR="$SUBTITLE_AR" LOGO_URL="$LOGO_URL" python3 /tmp/make_ui.py
-    echo "🎬 ترميز شاشة الانتظار..."
-    ffmpeg -y -hide_banner -loglevel warning -loop 1 -framerate 60 -i "$WORKDIR/bg.png" \
-        -f lavfi -i "anullsrc=r=44100:cl=stereo" -t 4 \
-        -c:v libx264 -preset ultrafast -pix_fmt yuv420p -g 120 -r 60 \
-        -c:a aac -b:a 128k -ar 44100 -ac 2 -shortest \
-        -mpegts_flags +resend_headers \
-        -f mpegts "$WORKDIR/standby.ts"
+: "${RESTREAM_KEY:?Missing GitHub secret RESTREAM_KEY}"
+if [[ ! "$RESTREAM_KEY" =~ ^[A-Za-z0-9_-]+$ ]]; then
+  echo "ERROR: RESTREAM_KEY contains unexpected characters."
+  exit 1
 fi
 
-# ==========================================================
-# SXB Broadcast V10 - Persistent FIFO Architecture
-# ==========================================================
+# Do not print RESTREAM_URL: it contains the private stream key.
+RESTREAM_URL="rtmp://live.restream.io/live/${RESTREAM_KEY}"
+KICK_URL="https://kick.com/${STREAMER}"
 
-set -uo pipefail
+FIFO="/tmp/sxb-relay.ts"
+WORKDIR="/tmp/sxb-standby"
+STANDBY_TS="$WORKDIR/standby.ts"
+OUT_PROGRESS="/tmp/sxb-out.progress"
+OUT_LOG="/tmp/sxb-out.log"
+PROD_LOG="/tmp/sxb-prod.log"
+STREAMLINK_LOG="/tmp/sxb-streamlink.log"
+KEEPER_READY="/tmp/sxb-keeper.ready"
 
-RESTREAM_URL="rtmp://live.restream.io/live/$RESTREAM_KEY"
-
-FIFO="/tmp/relay.ts"
-WORKDIR="/tmp/standby_sxb"
+# Live media is NOT assigned a target resolution or frame rate.
+# The standby slate is generated at 1080p60; live packets are copied as received.
+WIDTH=1920
+HEIGHT=1080
+FPS=60
+GOP=120
+AAC_ARGS=(-c:a aac -b:a 160k -ar 48000 -ac 2)
 
 OUT=""
 PROD=""
 KEEPER=""
-
-MODE="STANDBY"
+MODE="UNKNOWN"
 LIVE_FAILS=0
-LAST_CHECK=0
+LAST_STATUS_CHECK=0
+OUT_LAST_FRAME=""
+OUT_LAST_ADVANCE_AT=0
+GRACE_UNTIL=0
 
-OUT_STARTED=0
-PROD_STARTED=0
+log() {
+  printf '[%s] %s\n' "$(date -u '+%H:%M:%S')" "$*"
+}
 
-OUT_PREV_FRAME=""
-PROD_PREV_FRAME=""
+is_pid_alive() {
+  [[ -n "${1:-}" ]] && kill -0 "$1" 2>/dev/null
+}
 
-OUT_STALL=0
-PROD_STALL=0
-
-KEEPER_READY="/tmp/relay_keeper.ready"
-
-export STREAMER UA FIFO WORKDIR
-
-# ----------------------------------------------------------
-# Process management
-# ----------------------------------------------------------
-
+# A setsid-launched job has PID == process-group ID on this runner.
 stop_group() {
-    local pid="${1:-}"
-    local i=0
+  local pid="${1:-}"
+  local i
+  [[ -n "$pid" ]] || return 0
 
-    [ -n "$pid" ] || return 0
-
-    kill -TERM -- "-$pid" 2>/dev/null || true
-
-    while [ "$i" -lt 20 ]; do
-        if ! kill -0 -- "-$pid" 2>/dev/null; then
-            wait "$pid" 2>/dev/null || true
-            return 0
-        fi
-
-        sleep 0.2
-        i=$((i + 1))
-    done
-
-    kill -KILL -- "-$pid" 2>/dev/null || true
-
-    i=0
-    while [ "$i" -lt 30 ]; do
-        if ! kill -0 -- "-$pid" 2>/dev/null; then
-            wait "$pid" 2>/dev/null || true
-            return 0
-        fi
-
-        sleep 0.2
-        i=$((i + 1))
-    done
-
-    wait "$pid" 2>/dev/null || true
-
-    if kill -0 -- "-$pid" 2>/dev/null; then
-        echo "ERROR: Process group $pid still exists"
-        return 1
+  kill -TERM -- "-${pid}" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+  for ((i=0; i<25; i++)); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      break
     fi
+    sleep 0.2
+  done
 
-    return 0
+  if kill -0 -- "-${pid}" 2>/dev/null; then
+    kill -KILL -- "-${pid}" 2>/dev/null || true
+  elif kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+
+  wait "$pid" 2>/dev/null || true
 }
 
 stop_producer() {
-    [ -n "$PROD" ] || return 0
-
-    local old="$PROD"
-
-    if ! stop_group "$old"; then
-        return 1
-    fi
-
+  if [[ -n "$PROD" ]]; then
+    stop_group "$PROD"
     PROD=""
-    return 0
-}
-
-stop_keeper() {
-    [ -n "$KEEPER" ] || return 0
-
-    local old="$KEEPER"
-
-    if ! stop_group "$old"; then
-        return 1
-    fi
-
-    KEEPER=""
-    return 0
+  fi
 }
 
 stop_output() {
-    [ -n "$OUT" ] || return 0
-
-    local old="$OUT"
-    local i=0
-
-    kill -TERM "$old" 2>/dev/null || true
-
-    while [ "$i" -lt 20 ]; do
-        if ! kill -0 "$old" 2>/dev/null; then
-            wait "$old" 2>/dev/null || true
-            OUT=""
-            return 0
-        fi
-
-        sleep 0.2
-        i=$((i + 1))
-    done
-
-    kill -KILL "$old" 2>/dev/null || true
-    wait "$old" 2>/dev/null || true
-
-    if kill -0 "$old" 2>/dev/null; then
-        echo "ERROR: Output process did not stop"
-        return 1
-    fi
-
+  if [[ -n "$OUT" ]]; then
+    stop_group "$OUT"
     OUT=""
-    return 0
+  fi
+}
+
+stop_keeper() {
+  if [[ -n "$KEEPER" ]]; then
+    stop_group "$KEEPER"
+    KEEPER=""
+  fi
 }
 
 cleanup() {
-    trap - EXIT INT TERM
-
-    echo "Cleaning up..."
-
-    stop_producer || true
-    stop_output || true
-    stop_keeper || true
-
-    rm -f "$KEEPER_READY"
+  trap - EXIT INT TERM
+  log "Stopping relay processes..."
+  stop_producer
+  stop_output
+  stop_keeper
+  rm -f "$KEEPER_READY"
 }
-
 trap cleanup EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
 
-# ----------------------------------------------------------
-# FIFO
-# ----------------------------------------------------------
+progress_value() {
+  local file="$1"
+  local key="$2"
+  [[ -s "$file" ]] || return 0
+  tail -n 40 "$file" 2>/dev/null | \
+    awk -F= -v wanted="$key" '$1 == wanted { value=$2 } END { if (value != "") print value }' || true
+}
+
+normalize_number() {
+  local value="${1:-}"
+  value="${value//[[:space:]]/}"
+  [[ "$value" =~ ^[0-9]+$ ]] && printf '%s' "$value" || printf '0'
+}
+
+show_producer_diagnostics() {
+  echo "----- producer log (last 35 lines) -----"
+  tail -n 35 "$PROD_LOG" 2>/dev/null || true
+  echo "----- Streamlink log (last 35 lines) -----"
+  tail -n 35 "$STREAMLINK_LOG" 2>/dev/null || true
+}
+
+show_output_diagnostics() {
+  echo "----- output log (last 35 lines; key redacted) -----"
+  python3 - "$OUT_LOG" "$RESTREAM_KEY" <<'PYREDACT'
+import pathlib, sys
+path, secret = sys.argv[1], sys.argv[2]
+try:
+    lines = pathlib.Path(path).read_text(errors="replace").splitlines()[-35:]
+    for line in lines:
+        print(line.replace(secret, "[REDACTED]"))
+except Exception as exc:
+    print(f"Could not read output log: {exc}")
+PYREDACT
+
+}
+
+make_standby() {
+  mkdir -p "$WORKDIR"
+  log "Creating standby artwork..."
+
+  cat > "$WORKDIR/make_ui.py" <<'PYEOF'
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
+import io, os, urllib.request
+
+W = int(os.environ.get("WIDTH", "1920"))
+H = int(os.environ.get("HEIGHT", "1080"))
+workdir = os.environ["WORKDIR"]
+font_path = os.path.expanduser("~/.fonts/Cairo.ttf")
+if not os.path.isfile(font_path):
+    font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+title = os.environ.get("TITLE_AR", "توقف البث")
+subtitle = os.environ.get("SUBTITLE_AR", "جاري الانتظار...")
+streamer = os.environ.get("STREAMER", "SXB")
+logo_url = os.environ.get("LOGO_URL", "")
+
+def get_font(size):
+    try:
+        f = ImageFont.truetype(font_path, size)
+        try:
+            axes = f.get_variation_axes()
+            if len(axes) == 1:
+                f.set_variation_by_axes([700])
+        except Exception:
+            pass
+        return f
+    except Exception:
+        return ImageFont.load_default()
+
+def draw_rtl(draw, xy, text, font, fill):
+    try:
+        draw.text(xy, text, font=font, fill=fill, anchor="mm", direction="rtl", language="ar")
+    except Exception:
+        draw.text(xy, text, font=font, fill=fill, anchor="mm")
+
+# Smooth dark-red vertical background.
+bg = Image.new("RGB", (W, H))
+pix = bg.load()
+for y in range(H):
+    t = y / max(1, H - 1)
+    row = (int(20 - 12*t), int(10 - 7*t), int(18 - 12*t))
+    for x in range(W):
+        pix[x, y] = row
+bg = bg.convert("RGBA")
+
+# Soft centered red light, kept subtle so text remains clean.
+glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+gd = ImageDraw.Draw(glow)
+gd.ellipse((250, 70, 1030, 650), fill=(170, 12, 28, 75))
+bg = Image.alpha_composite(bg, glow.filter(ImageFilter.GaussianBlur(115)))
+
+d = ImageDraw.Draw(bg)
+d.rounded_rectangle((55, 45, W-55, H-45), radius=24,
+                     fill=(13, 10, 15, 175), outline=(190, 35, 48, 175), width=2)
+d.rounded_rectangle((68, 58, W-68, H-58), radius=18,
+                     outline=(255, 255, 255, 28), width=1)
+
+# Logo is optional; failure to download it does not stop the relay.
+if logo_url:
+    try:
+        req = urllib.request.Request(logo_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8) as response:
+            logo = Image.open(io.BytesIO(response.read())).convert("RGBA")
+        logo.thumbnail((115, 115), Image.Resampling.LANCZOS)
+        bg.alpha_composite(logo, ((W-logo.width)//2, 88))
+    except Exception:
+        pass
+
+d = ImageDraw.Draw(bg)
+# A small accent line, rather than excessive glow or decoration.
+d.rounded_rectangle((W//2-95, 235, W//2+95, 242), radius=3, fill=(220, 35, 52, 230))
+draw_rtl(d, (W//2, 335), title, get_font(64), (255, 255, 255, 255))
+draw_rtl(d, (W//2, 420), subtitle, get_font(31), (220, 215, 220, 255))
+d.text((W//2, 545), streamer, font=get_font(72), fill=(235, 45, 58, 255), anchor="mm")
+bg.convert("RGB").save(os.path.join(workdir, "standby.png"), quality=95)
+PYEOF
+
+  WORKDIR="$WORKDIR" WIDTH="$WIDTH" HEIGHT="$HEIGHT" STREAMER="$STREAMER" TITLE_AR="$TITLE_AR" \
+    SUBTITLE_AR="$SUBTITLE_AR" LOGO_URL="$LOGO_URL" python3 "$WORKDIR/make_ui.py"
+
+  log "Encoding standby slate (1920x1080 @ 60 FPS, H.264/AAC)..."
+  ffmpeg -hide_banner -loglevel error -y \
+    -loop 1 -framerate "$FPS" -i "$WORKDIR/standby.png" \
+    -f lavfi -i "anullsrc=r=48000:cl=stereo" \
+    -t 6 -map 0:v:0 -map 1:a:0 \
+    -vf "format=yuv420p" \
+    -c:v libx264 -preset ultrafast -tune zerolatency -pix_fmt yuv420p \
+    -r 60 -g 120 -keyint_min 120 -threads 2 \
+    "${AAC_ARGS[@]}" \
+    -mpegts_flags +resend_headers+initial_discontinuity \
+    -f mpegts "$STANDBY_TS"
+
+  [[ -s "$STANDBY_TS" ]] || { log "ERROR: standby.ts was not created."; return 1; }
+  ffprobe -v error -select_streams v:0 \
+    -show_entries stream=codec_name,width,height \
+    -of default=noprint_wrappers=1 "$STANDBY_TS" >/tmp/sxb-standby-probe.txt
+  grep -q '^codec_name=h264$' /tmp/sxb-standby-probe.txt || {
+    log "ERROR: standby video is not H.264."; cat /tmp/sxb-standby-probe.txt; return 1;
+  }
+  log "Standby video validated."
+}
 
 setup_fifo() {
-    rm -f "$FIFO" "$KEEPER_READY"
-
-    if ! mkfifo "$FIFO"; then
-        echo "ERROR: Cannot create FIFO"
-        return 1
-    fi
+  # Call only after producer, output and keeper have all been stopped.
+  rm -f "$FIFO" "$KEEPER_READY"
+  mkfifo -m 600 "$FIFO"
 }
+start_output() {
+  rm -f "$OUT_PROGRESS"
+  : > "$OUT_LOG"
+  log "Starting the persistent Restream output..."
 
-# ----------------------------------------------------------
-# Persistent writer
-# ----------------------------------------------------------
+  setsid ffmpeg -hide_banner -loglevel warning -nostdin \
+    -thread_queue_size 1024 \
+    -fflags +genpts+discardcorrupt \
+    -probesize 100000 -analyzeduration 1000000 \
+    -stats_period 1 -progress "$OUT_PROGRESS" \
+    -f mpegts -i "$FIFO" \
+    -map 0:v:0 -map 0:a:0? \
+    -c:v copy -c:a copy \
+    -max_muxing_queue_size 2048 \
+    -flvflags no_duration_filesize -rtmp_live live \
+    -flush_packets 1 \
+    -f flv "$RESTREAM_URL" \
+    >/dev/null 2>"$OUT_LOG" &
+  OUT=$!
+
+  sleep 0.5
+  if ! is_pid_alive "$OUT"; then
+    log "ERROR: output FFmpeg exited during startup."
+    show_output_diagnostics
+    return 1
+  fi
+}
 
 start_keeper() {
-    rm -f "$KEEPER_READY"
+  rm -f "$KEEPER_READY"
+  # Keep one FIFO writer descriptor open. It prevents the input reader from
+  # seeing EOF during the short gap between producers; it never writes bytes.
+  setsid bash -c 'exec 3>"$1" || exit 1; : > "$2"; exec sleep infinity' \
+    _ "$FIFO" "$KEEPER_READY" >/tmp/sxb-keeper.log 2>&1 &
+  KEEPER=$!
 
-    setsid bash -c '
-        exec 3>"$1" || exit 1
-        : > "$2"
-        exec sleep infinity
-    ' _ "$FIFO" "$KEEPER_READY" >/tmp/keeper.log 2>&1 &
+  local i
+  for ((i=0; i<100; i++)); do
+    if [[ -f "$KEEPER_READY" ]]; then
+      if ! is_pid_alive "$OUT"; then
+        log "ERROR: output died while opening the FIFO."
+        stop_keeper
+        return 1
+      fi
+      return 0
+    fi
+    if ! is_pid_alive "$OUT"; then
+      log "ERROR: output exited before the FIFO keeper connected."
+      stop_keeper
+      return 1
+    fi
+    sleep 0.1
+  done
 
-    KEEPER=$!
-
-    local i=0
-
-    while [ "$i" -lt 100 ]; do
-        if [ -f "$KEEPER_READY" ]; then
-            if ! kill -0 "$OUT" 2>/dev/null; then
-                echo "ERROR: Output died during FIFO initialization"
-                stop_keeper || true
-                return 1
-            fi
-
-            return 0
-        fi
-
-        if ! kill -0 "$OUT" 2>/dev/null; then
-            echo "ERROR: Output failed to open FIFO"
-            stop_keeper || true
-            return 1
-        fi
-
-        sleep 0.1
-        i=$((i + 1))
-    done
-
-    echo "ERROR: FIFO writer initialization timed out"
-    stop_keeper || true
-    return 1
+  log "ERROR: FIFO keeper could not connect to the output reader."
+  stop_keeper
+  return 1
 }
 
-# ----------------------------------------------------------
-# Output
-# ----------------------------------------------------------
-
-start_output() {
-    rm -f /tmp/out.prog
-
-    ffmpeg -y -hide_banner -loglevel warning -nostdin \
-        -thread_queue_size 512 \
-        -fflags +genpts+discardcorrupt \
-        -f mpegts -i "$FIFO" \
-        -map 0:v:0 -map 0:a:0? \
-        -c:v copy -c:a copy \
-        -max_muxing_queue_size 4096 \
-        -flvflags no_duration_filesize \
-        -rtmp_live live \
-        -progress /tmp/out.prog \
-        -stats_period 1 \
-        -f flv "$RESTREAM_URL" \
-        >/tmp/out.log 2>&1 &
-
-    OUT=$!
-    OUT_STARTED=$(date +%s)
-    OUT_PREV_FRAME=""
-    OUT_STALL=0
+wait_for_output_advance() {
+  local baseline="$1" timeout_seconds="$2"
+  local i frame
+  for ((i=0; i<timeout_seconds; i++)); do
+    frame="$(normalize_number "$(progress_value "$OUT_PROGRESS" frame)")"
+    if (( frame > baseline )); then
+      return 0
+    fi
+    if ! is_pid_alive "$OUT"; then
+      log "Output process exited while waiting for incoming video."
+      return 1
+    fi
+    sleep 1
+  done
+  log "Output did not advance after producer startup."
+  return 1
 }
-
-# ----------------------------------------------------------
-# Producer progress
-# ----------------------------------------------------------
-
-get_frame() {
-    local file="$1"
-
-    [ -f "$file" ] || return 0
-
-    tail -n 30 "$file" 2>/dev/null |
-        awk -F= '$1=="frame" {v=$2} END {print v}'
-}
-
-wait_producer_ready() {
-    local i=0
-    local frame=""
-
-    while [ "$i" -lt 20 ]; do
-        if ! kill -0 "$PROD" 2>/dev/null; then
-            echo "Producer process exited"
-            return 1
-        fi
-
-        frame=$(get_frame /tmp/prod.prog)
-
-        if [[ "$frame" =~ ^[0-9]+$ ]] && [ "$frame" -gt 0 ]; then
-            return 0
-        fi
-
-        sleep 1
-        i=$((i + 1))
-    done
-
-    echo "Producer did not deliver video frames in time"
-    return 1
-}
-
-# ----------------------------------------------------------
-# Standby producer
-# ----------------------------------------------------------
 
 start_producer_standby() {
-    rm -f /tmp/prod.prog
+  local baseline
+  stop_producer
+  sleep 1
+  : > "$PROD_LOG"
+  : > "$STREAMLINK_LOG"
+  baseline="$(normalize_number "$(progress_value "$OUT_PROGRESS" frame)")"
 
-    setsid ffmpeg -y -hide_banner -loglevel warning -nostdin \
-        -re -stream_loop -1 \
-        -i "$WORKDIR/standby.ts" \
-        -c copy \
-        -mpegts_flags +resend_headers \
-        -progress /tmp/prod.prog \
-        -stats_period 1 \
-        -f mpegts "$FIFO" \
-        >/tmp/prod.log 2>&1 &
+  log "Starting standby producer..."
+  setsid ffmpeg -y -hide_banner -loglevel warning -nostdin \
+    -re -stream_loop -1 -i "$STANDBY_TS" \
+    -map 0:v:0 -map 0:a:0 \
+    -c copy -mpegts_flags +resend_headers+initial_discontinuity \
+    -f mpegts "$FIFO" \
+    >/dev/null 2>"$PROD_LOG" &
+  PROD=$!
 
-    PROD=$!
-    PROD_STARTED=$(date +%s)
-    PROD_PREV_FRAME=""
-    PROD_STALL=0
-
-    if wait_producer_ready; then
-        MODE="STANDBY"
-        echo "STANDBY producer ready"
-        return 0
-    fi
-
-    stop_producer || return 1
+  # Readiness is measured at the output: this verifies packets passed through
+  # the FIFO and were muxed by the RTMP FFmpeg, not just that a producer PID exists.
+  if ! wait_for_output_advance "$baseline" 35; then
+    show_producer_diagnostics
+    stop_producer
     return 1
-}
+  fi
 
-# ----------------------------------------------------------
-# LIVE producer
-# ----------------------------------------------------------
+  MODE="STANDBY"
+  reset_watchdog_baselines
+  log "Standby video is flowing through the output."
+  return 0
+}
 
 start_producer_live() {
-    rm -f /tmp/prod.prog
+  local baseline
+  stop_producer
+  sleep 0.3
+  : > "$PROD_LOG"
+  : > "$STREAMLINK_LOG"
+  baseline="$(normalize_number "$(progress_value "$OUT_PROGRESS" frame)")"
 
-    setsid bash -o pipefail -c '
-        streamlink \
-            --http-header "User-Agent=$UA" \
-            "https://kick.com/$STREAMER" \
-            best --stdout 2>/tmp/sl_err.log |
-        ffmpeg -y -hide_banner -loglevel warning -nostdin \
-            -thread_queue_size 512 \
-            -fflags +genpts+discardcorrupt \
-            -i pipe:0 \
-            -c:v copy \
-            -c:a aac -b:a 128k -ar 44100 -ac 2 \
-            -mpegts_flags +resend_headers \
-            -progress /tmp/prod.prog \
-            -stats_period 1 \
-            -f mpegts "$FIFO" \
-            >/tmp/prod.log 2>&1
-    ' >/dev/null 2>&1 &
+  log "Starting direct Kick pass-through for ${STREAMER} (no video re-encode)..."
+  export STREAMER UA KICK_URL FIFO STREAMLINK_LOG
 
-    PROD=$!
-    PROD_STARTED=$(date +%s)
-    PROD_PREV_FRAME=""
-    PROD_STALL=0
+  # Streamlink writes the source transport stream directly into the FIFO.
+  # No FFmpeg encoder, scaling filter, FPS conversion, or bitrate cap is used
+  # on the LIVE video path.
+  setsid bash -c '
+    exec streamlink --stdout --http-header "User-Agent=$UA" "$KICK_URL" best \
+      2>"$STREAMLINK_LOG" > "$FIFO"
+  ' &
+  PROD=$!
 
-    if wait_producer_ready; then
-        MODE="LIVE"
-        LIVE_FAILS=0
-        echo "LIVE producer ready"
-        return 0
-    fi
-
-    stop_producer || return 1
+  # Require actual output frames, not just a live status response or PID.
+  if ! wait_for_output_advance "$baseline" 10; then
+    show_producer_diagnostics
+    stop_producer
     return 1
+  fi
+
+  MODE="LIVE"
+  LIVE_FAILS=0
+  reset_watchdog_baselines
+  log "LIVE source packets are reaching the output (video copied as received)."
+  return 0
 }
 
-# ----------------------------------------------------------
-# Kick status
-# ----------------------------------------------------------
+reset_watchdog_baselines() {
+  local now frame
+  now=$(date +%s)
+  frame="$(normalize_number "$(progress_value "$OUT_PROGRESS" frame)")"
+  OUT_LAST_FRAME="$frame"
+  OUT_LAST_ADVANCE_AT="$now"
+  GRACE_UNTIL=$((now + 5))
+}
 
 is_live() {
-    local url=""
-
-    url=$(
-        timeout 6 streamlink \
-            --http-header "User-Agent=$UA" \
-            "https://kick.com/$STREAMER" \
-            best --stream-url 2>/dev/null |
-        grep -m1 '^http' || true
-    )
-
-    [ -n "$url" ]
+  local result
+  result="$(timeout --signal=TERM --kill-after=2s 8s \
+    streamlink --stream-url --http-header "User-Agent=$UA" "$KICK_URL" best \
+    2>/dev/null | head -n 1 || true)"
+  [[ "$result" == http://* || "$result" == https://* ]]
 }
 
-# ----------------------------------------------------------
-# Select source
-# ----------------------------------------------------------
-
 start_best_source() {
-    if is_live; then
-        echo "Kick reports LIVE"
-
-        if start_producer_live; then
-            return 0
-        fi
-
-        echo "LIVE startup failed; falling back to standby"
+  if is_live; then
+    log "Kick reports ${STREAMER} LIVE; validating the media path..."
+    if start_producer_live; then
+      return 0
     fi
-
-    start_producer_standby
+    log "LIVE startup did not pass the media checks; using standby."
+  else
+    log "Kick reports ${STREAMER} OFFLINE; using standby."
+  fi
+  start_producer_standby
 }
 
 switch_to_live() {
-    echo "Switching to LIVE..."
-
-    if ! stop_producer; then
-        echo "ERROR: Could not stop previous producer"
-        return 1
-    fi
-
-    if start_producer_live; then
-        LIVE_FAILS=0
-        return 0
-    fi
-
-    echo "LIVE failed; switching to standby"
-
-    start_producer_standby
+  log "Switching source: STANDBY -> LIVE."
+  if start_producer_live; then
+    return 0
+  fi
+  log "LIVE transition failed; restoring standby."
+  start_producer_standby
 }
 
 switch_to_standby() {
-    echo "Switching to STANDBY..."
-
-    if ! stop_producer; then
-        echo "ERROR: Could not stop previous producer"
-        return 1
-    fi
-
-    LIVE_FAILS=0
-    start_producer_standby
+  log "Switching source: LIVE -> STANDBY."
+  LIVE_FAILS=0
+  start_producer_standby
 }
 
-# ----------------------------------------------------------
-# Full output restart
-# ----------------------------------------------------------
-
-restart_all() {
-    echo "Restarting complete relay..."
-
-    if ! stop_producer; then return 1; fi
-    if ! stop_output; then return 1; fi
-    if ! stop_keeper; then return 1; fi
-
-    if ! setup_fifo; then return 1; fi
-
-    start_output
-
-    if ! start_keeper; then
-        stop_output || true
-        return 1
-    fi
-
-    if ! start_best_source; then
-        echo "ERROR: Could not start any producer"
-        return 1
-    fi
-
-    OUT_PREV_FRAME=""
-    OUT_STALL=0
-
-    echo "Relay restarted successfully"
-    return 0
+rebuild_output() {
+  local attempt="$1"
+  log "Rebuilding FIFO/output stack (attempt ${attempt})..."
+  stop_producer
+  stop_output
+  stop_keeper
+  setup_fifo || return 1
+  start_output || return 1
+  start_keeper || { stop_output; return 1; }
+  start_best_source
 }
 
-# ----------------------------------------------------------
+recover_producer() {
+  log "Producer health check failed; selecting a fresh source."
+  stop_producer
+  start_best_source
+}
+
+# -----------------------------
 # Initialization
-# ----------------------------------------------------------
-
-echo "Starting SXB relay..."
-
-if ! setup_fifo; then
+# -----------------------------
+for command in ffmpeg ffprobe streamlink python3 setsid timeout; do
+  command -v "$command" >/dev/null 2>&1 || {
+    log "ERROR: Required command not found: $command"
     exit 1
-fi
+  }
+done
 
+make_standby
+setup_fifo
 start_output
-
-if ! start_keeper; then
-    exit 1
-fi
+start_keeper
 
 if ! start_best_source; then
-    echo "ERROR: Initial producer startup failed"
+  log "Initial source could not be started; trying one complete output rebuild."
+  if ! rebuild_output 1; then
+    log "ERROR: Initial relay startup failed."
     exit 1
+  fi
 fi
 
-LAST_CHECK=$(date +%s)
+LAST_STATUS_CHECK=$(date +%s)
+log "Relay initialized in ${MODE} mode."
 
-# ----------------------------------------------------------
-# Main watchdog loop
-# ----------------------------------------------------------
-
+# -----------------------------
+# Supervisor loop
+# -----------------------------
 while true; do
-    NOW=$(date +%s)
+  now=$(date +%s)
 
-    # 1. Output process death
-    if ! kill -0 "$OUT" 2>/dev/null; then
-        echo "Output process died"
-
-        if ! restart_all; then
-            echo "ERROR: Full restart failed"
-            exit 1
-        fi
-
-        LAST_CHECK=$(date +%s)
-        continue
+  if ! is_pid_alive "$OUT"; then
+    log "Output process is not alive."
+    show_output_diagnostics
+    if ! rebuild_output 1; then
+      sleep 5
+      if ! rebuild_output 2; then
+        log "ERROR: Output recovery failed twice; ending this run for GitHub Actions to restart on schedule."
+        exit 1
+      fi
     fi
+    LAST_STATUS_CHECK=$(date +%s)
+    continue
+  fi
 
-    # 2. Producer process death
-    if ! kill -0 "$PROD" 2>/dev/null; then
-        echo "Producer process died"
-
-        if ! stop_producer; then
-            exit 1
-        fi
-
-        if ! start_best_source; then
-            echo "ERROR: Producer recovery failed"
-            exit 1
-        fi
-
-        continue
+  if ! is_pid_alive "$PROD"; then
+    log "Producer process is not alive."
+    if ! recover_producer; then
+      log "Producer recovery failed; rebuilding output stack."
+      if ! rebuild_output 1; then
+        sleep 5
+        if ! rebuild_output 2; then exit 1; fi
+      fi
     fi
+    continue
+  fi
 
-    # 3. Output video-frame watchdog
-    if [ $((NOW - OUT_STARTED)) -ge 20 ]; then
-        OUT_FRAME=$(get_frame /tmp/out.prog)
-        OUT_MTIME=$(stat -c %Y /tmp/out.prog 2>/dev/null || echo 0)
-        OUT_AGE=$((NOW - OUT_MTIME))
+  # Track actual output video-frame progress, not merely file modification time.
+  out_frame="$(normalize_number "$(progress_value "$OUT_PROGRESS" frame)")"
+  if (( out_frame > ${OUT_LAST_FRAME:-0} )); then
+    OUT_LAST_FRAME="$out_frame"
+    OUT_LAST_ADVANCE_AT="$now"
+  fi
 
-        if [ "$OUT_AGE" -ge 15 ]; then
-            OUT_STALL=12
-        elif [[ "$OUT_FRAME" =~ ^[0-9]+$ ]]; then
-            if [ -n "$OUT_PREV_FRAME" ] &&
-               [ "$OUT_FRAME" -le "$OUT_PREV_FRAME" ]; then
-                OUT_STALL=$((OUT_STALL + 1))
-            else
-                OUT_STALL=0
-            fi
-
-            OUT_PREV_FRAME="$OUT_FRAME"
-        else
-            OUT_STALL=$((OUT_STALL + 1))
+  if (( now >= GRACE_UNTIL )); then
+    if (( now - OUT_LAST_ADVANCE_AT >= 5 )); then
+      if [[ "$MODE" == "LIVE" ]]; then
+        log "LIVE video stalled for 5 seconds; switching to standby slate."
+        if ! switch_to_standby; then
+          log "Could not start standby after LIVE stall; rebuilding output stack."
+          if ! rebuild_output 1; then
+            sleep 3
+            if ! rebuild_output 2; then exit 1; fi
+          fi
         fi
-
-        if [ "$OUT_STALL" -ge 12 ]; then
-            echo "Output video progress stalled"
-
-            if ! restart_all; then
-                echo "ERROR: Output recovery failed"
-                exit 1
-            fi
-
-            LAST_CHECK=$(date +%s)
-            continue
+      else
+        log "Standby output has stalled for 5 seconds; rebuilding output stack."
+        if ! rebuild_output 1; then
+          sleep 3
+          if ! rebuild_output 2; then exit 1; fi
         fi
+      fi
+      LAST_STATUS_CHECK=$(date +%s)
+      continue
     fi
+  fi
 
-    # 4. Producer video-frame watchdog
-    if [ $((NOW - PROD_STARTED)) -ge 20 ]; then
-        PROD_FRAME=$(get_frame /tmp/prod.prog)
-        PROD_MTIME=$(stat -c %Y /tmp/prod.prog 2>/dev/null || echo 0)
-        PROD_AGE=$((NOW - PROD_MTIME))
-
-        if [ "$PROD_AGE" -ge 15 ]; then
-            PROD_STALL=12
-        elif [[ "$PROD_FRAME" =~ ^[0-9]+$ ]]; then
-            if [ -n "$PROD_PREV_FRAME" ] &&
-               [ "$PROD_FRAME" -le "$PROD_PREV_FRAME" ]; then
-                PROD_STALL=$((PROD_STALL + 1))
-            else
-                PROD_STALL=0
-            fi
-
-            PROD_PREV_FRAME="$PROD_FRAME"
-        else
-            PROD_STALL=$((PROD_STALL + 1))
+  # Check Kick less frequently than the media watchdog.
+  if (( now - LAST_STATUS_CHECK >= 5 )); then
+    LAST_STATUS_CHECK="$now"
+    if is_live; then
+      if [[ "$MODE" == "STANDBY" ]]; then
+        if ! switch_to_live; then
+          log "LIVE switch did not validate; remaining in STANDBY."
         fi
-
-        if [ "$PROD_STALL" -ge 12 ]; then
-            echo "Producer video progress stalled"
-
-            if ! stop_producer; then
-                exit 1
+      else
+        LIVE_FAILS=0
+      fi
+    else
+      if [[ "$MODE" == "LIVE" ]]; then
+        LIVE_FAILS=$((LIVE_FAILS + 1))
+        log "Kick status check failed (${LIVE_FAILS}/3)."
+        if (( LIVE_FAILS >= 3 )); then
+          if ! switch_to_standby; then
+            log "Standby transition failed; rebuilding output stack."
+            if ! rebuild_output 1; then
+              sleep 5
+              if ! rebuild_output 2; then exit 1; fi
             fi
-
-            if ! start_best_source; then
-                echo "ERROR: Producer recovery failed"
-                exit 1
-            fi
-
-            continue
+          fi
         fi
+      fi
     fi
+  fi
 
-    # 5. Kick status every 10 seconds
-    if [ $((NOW - LAST_CHECK)) -ge 10 ]; then
-        LAST_CHECK=$NOW
-
-        if is_live; then
-            if [ "$MODE" = "STANDBY" ]; then
-                echo "Kick streamer is LIVE"
-
-                if ! switch_to_live; then
-                    echo "ERROR: LIVE transition failed"
-                    exit 1
-                fi
-            else
-                LIVE_FAILS=0
-            fi
-        else
-            if [ "$MODE" = "LIVE" ]; then
-                LIVE_FAILS=$((LIVE_FAILS + 1))
-                echo "Kick check failed: $LIVE_FAILS/3"
-
-                if [ "$LIVE_FAILS" -ge 3 ]; then
-                    if ! switch_to_standby; then
-                        echo "ERROR: STANDBY transition failed"
-                        exit 1
-                    fi
-                fi
-            fi
-        fi
-    fi
-
-    sleep 1
+  sleep 1
 done
