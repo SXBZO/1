@@ -1,4 +1,4 @@
-name: SXB Absolute 24-7 Broadcast
+name: SXB Broadcast Relay
 
 on:
   workflow_dispatch:
@@ -17,50 +17,57 @@ jobs:
     timeout-minutes: 355
 
     steps:
-      - name: جلب الملفات
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: تثبيت الأدوات والخطوط
+      - name: Install relay dependencies
+        shell: bash
         run: |
-          set -e
-          sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
+          set -Eeuo pipefail
           sudo apt-get update -qq
-          timeout 300 sudo apt-get install -y --no-install-recommends ffmpeg fontconfig libraqm0 libfribidi0
-          pip3 install --user --break-system-packages --quiet --upgrade Pillow streamlink
-          
-          mkdir -p ~/.fonts
-          for URL in \
-            "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/cairo/Cairo%5Bslnt%2Cwght%5D.ttf" \
-            "https://raw.githubusercontent.com/google/fonts/main/ofl/cairo/Cairo%5Bslnt%2Cwght%5D.ttf"; do
-            curl -sL --max-time 30 "$URL" -o ~/.fonts/Cairo-var.ttf 2>/dev/null || true
-            [ "$(stat -c%s ~/.fonts/Cairo-var.ttf 2>/dev/null || echo 0)" -gt 50000 ] && break
-          done
-          for URL in \
-            "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/orbitron/Orbitron%5Bwght%5D.ttf" \
-            "https://raw.githubusercontent.com/google/fonts/main/ofl/orbitron/Orbitron%5Bwght%5D.ttf"; do
-            curl -sL --max-time 30 "$URL" -o ~/.fonts/Orbitron-var.ttf 2>/dev/null || true
-            [ "$(stat -c%s ~/.fonts/Orbitron-var.ttf 2>/dev/null || echo 0)" -gt 20000 ] && break
-          done
-          fc-cache -f >/dev/null 2>&1
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg curl ca-certificates fontconfig fonts-dejavu-core \
+            python3-pip libraqm0 libfribidi0
 
-      - name: PATH
-        run: echo "$HOME/.local/bin" >> $GITHUB_PATH
+          python3 -m pip install --user --break-system-packages \
+            --disable-pip-version-check --quiet --upgrade pillow streamlink
 
-      - name: جدولة الرن التالي (بعد 5س30د)
+          mkdir -p "$HOME/.fonts"
+          FONT_URL="https://raw.githubusercontent.com/google/fonts/main/ofl/cairo/Cairo%5Bslnt%2Cwght%5D.ttf"
+          if curl -fLsS --retry 2 --connect-timeout 10 --max-time 45 \
+              "$FONT_URL" -o "$HOME/.fonts/Cairo.ttf"; then
+            if [ "$(stat -c %s "$HOME/.fonts/Cairo.ttf")" -lt 20000 ]; then
+              rm -f "$HOME/.fonts/Cairo.ttf"
+            fi
+          fi
+          fc-cache -f >/dev/null 2>&1 || true
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Schedule the next run
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          setsid nohup bash -c "
+          set -Eeuo pipefail
+          # Dispatch before this job reaches its 355-minute timeout.
+          # GitHub Actions concurrency allows one running and one pending run.
+          nohup setsid bash -c '
             sleep 19800
-            gh workflow run main.yml --ref '${{ github.ref_name }}'
-          " >/tmp/sched.log 2>&1 < /dev/null &
-          echo "✅"
+            gh workflow run main.yml --repo "$REPOSITORY" --ref "$REF_NAME"
+          ' >/tmp/sxb-scheduler.log 2>&1 </dev/null &
+          echo "Next-run scheduler armed."
 
-      - name: تشغيل البث
+      - name: Start SXB relay
+        shell: bash
         env:
-          RESTREAM_KEY: 're_12552561_event81737fba9ada4713ab13ad7e04a36880' # المفتاح المباشر
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_RUN_ID: ${{ github.run_id }}
+          RESTREAM_KEY: ${{ secrets.RESTREAM_KEY }}
+          STREAMER: SXB
+          TITLE_AR: "توقف البث من شونق"
+          SUBTITLE_AR: "بث شونق سابثون 30 يوم!"
+          LOGO_URL: "https://a.top4top.io/p_394102x460.png"
         run: |
+          set -Eeuo pipefail
           chmod +x stream.sh
           ./stream.sh
