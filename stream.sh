@@ -1,38 +1,74 @@
 #!/bin/bash
 set -u
 
+REPO="${GITHUB_REPOSITORY}"
+WORKFLOW_FILE="main.yml"
+API_BASE="https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW_FILE}/runs"
+
 KICK_CHANNEL="${KICK_CHANNEL:-SXB}"
 RESTREAM_KEY="${RESTREAM_KEY:?RESTREAM_KEY required}"
 RESTREAM_URL="${RESTREAM_URL:-rtmp://live.restream.io/live}"
 PLACEHOLDER_IMAGE="${PLACEHOLDER_IMAGE:-placeholder.png}"
 
-MAX_STREAM_SEC=19200      # 320 دقيقة = حد البث لكل جولة
-TRIGGER_AT_SEC=18000      # إطلاق التشغيل التالي عند الدقيقة 300
-
+MAX_STREAM_SEC=19200      # 320 دقيقة (وقت الخروج)
+TRIGGER_AT_SEC=18000      # 300 دقيقة (وقت إطلاق الرن التالي)
 START_TS=$(date +%s)
-TRIGGER_ATTEMPTED=0
-TRIGGER_PID=""
-TRIGGER_OK_FILE="/tmp/trigger_ok_$$"
-rm -f "$TRIGGER_OK_FILE"
 
+# ==========================================
+# 1. منطق الانتظار (Watchdog) 
+# ==========================================
+get_active_runs() {
+    curl -s -H "Authorization: token ${GITHUB_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "${API_BASE}?per_page=30" | \
+    jq -r --arg self "$GITHUB_RUN_ID" \
+      '.workflow_runs[]? | select(.id != ($self|tonumber)) | select(.status == "in_progress" or .status == "queued" or .status == "waiting") | "\(.id):\(.event):\(.status)"' \
+      2>/dev/null || true
+}
+
+count_chain() {
+    echo "$1" | grep ":repository_dispatch:" | wc -l | tr -d ' '
+}
+
+# إذا كان هذا الرن (Cron أو يدوي) وهناك سلسلة نشطة، انسحب فوراً لتجنب التداخل
+if [ "${TRIGGER_TYPE}" != "repository_dispatch" ]; then
+    INITIAL=$(get_active_runs)
+    if [ "$(count_chain "$INITIAL")" -gt 0 ]; then
+        echo "[$(date)] هناك سلسلة نشطة بالفعل. سيتم الإلغاء لتجنب التكرار."
+        exit 0
+    fi
+fi
+
+# انتظر حتى يخلو الجو من أي رن آخر
+echo "[$(date)] جاري فحص الرنات السابقة..."
+while true; do
+    ACTIVE=$(get_active_runs)
+    if [ -z "$ACTIVE" ]; then
+        echo "[$(date)] لا يوجد رن نشط. بدء البث الآن."
+        break
+    fi
+    sleep 3
+done
+
+# ==========================================
+# 2. منطق البث (Streaming)
+# ==========================================
 trigger_next() {
-    echo "[$(date)] Triggering next chain run..."
+    echo "[$(date)] جاري إطلاق الرن التالي..."
     for attempt in $(seq 1 10); do
-        CODE=$(curl -s -o /tmp/trigger_resp_$$ -w "%{http_code}" \
+        CODE=$(curl -s -o /dev/null -w "%{http_code}" \
             -X POST \
             -H "Authorization: token ${GITHUB_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/dispatches" \
+            "https://api.github.com/repos/${REPO}/dispatches" \
             -d "{\"event_type\":\"chain-trigger\",\"client_payload\":{\"parent_run\":\"${GITHUB_RUN_ID}\"}}")
         if [ "$CODE" = "204" ]; then
-            echo "[$(date)] Trigger OK (attempt $attempt)"
-            touch "$TRIGGER_OK_FILE"
+            echo "[$(date)] تم إطلاق الرن التالي بنجاح."
             return 0
         fi
-        echo "[$(date)] Trigger failed HTTP=$CODE (attempt $attempt)"
+        echo "[$(date)] فشل الإطلاق (HTTP=$CODE). محاولة $attempt..."
         sleep 10
     done
-    echo "[$(date)] Trigger FAILED after 10 attempts"
     return 1
 }
 
@@ -63,15 +99,20 @@ run_placeholder() {
     echo $!
 }
 
+TRIGGER_ATTEMPTED=0
+TRIGGER_PID=""
+
 while true; do
     NOW=$(date +%s)
     ELAPSED=$((NOW - START_TS))
 
+    # الخروج عند الوصول للحد الأقصى
     if [ "$ELAPSED" -ge "$MAX_STREAM_SEC" ]; then
-        echo "[$(date)] MAX_STREAM_SEC reached, exiting."
+        echo "[$(date)] وصلنا للحد الأقصى. إيقاف البث."
         break
     fi
 
+    # إطلاق الرن التالي في الدقيقة 300
     if [ "$TRIGGER_ATTEMPTED" -eq 0 ] && [ "$ELAPSED" -ge "$TRIGGER_AT_SEC" ]; then
         TRIGGER_ATTEMPTED=1
         trigger_next &
@@ -83,19 +124,20 @@ while true; do
 
     if [ -z "$STREAM_URL" ]; then
         SEG=$(( REMAINING < 60 ? REMAINING : 60 ))
-        echo "[$(date)] Channel offline. Placeholder for ${SEG}s."
+        echo "[$(date)] القناة غير متصلة. عرض شاشة الانتظار لـ ${SEG} ثانية."
         FF_PID=$(run_placeholder "$SEG") || FF_PID=""
     else
-        echo "[$(date)] Streaming. Remaining budget=${REMAINING}s."
+        echo "[$(date)] القناة متصلة. بدء النسخ المباشر (متبقي ${REMAINING} ثانية)."
         FF_PID=$(run_stream "$REMAINING" "$STREAM_URL")
     fi
 
     if [ -z "$FF_PID" ]; then
-        echo "[$(date)] ffmpeg failed to start, retrying in 30s."
+        echo "[$(date)] فشل تشغيل ffmpeg. إعادة المحاولة بعد 30 ثانية."
         sleep 30
         continue
     fi
 
+    # مراقبة ffmpeg
     while kill -0 "$FF_PID" 2>/dev/null; do
         NOW=$(date +%s)
         if [ $((NOW - START_TS)) -ge "$MAX_STREAM_SEC" ]; then
@@ -112,23 +154,13 @@ while true; do
     fi
 done
 
-# اجمع أي trigger معلّق
+# في حال لم يتم إطلاق الرن التالي، أطلقه الآن
 if [ -n "$TRIGGER_PID" ]; then
-    echo "[$(date)] Waiting for pending trigger..."
     wait "$TRIGGER_PID" 2>/dev/null || true
 fi
 
-# إذا لم يُطلق أي trigger بعد (جولة قصيرة)، أطلقه الآن
 if [ "$TRIGGER_ATTEMPTED" -eq 0 ]; then
-    echo "[$(date)] Trigger never fired. Final attempt."
-    trigger_next 10 || echo "FINAL TRIGGER FAILED"
-fi
-
-# تحقق نهائي
-if [ -f "$TRIGGER_OK_FILE" ]; then
-    echo "[$(date)] Next chain run confirmed triggered."
-else
-    echo "[$(date)] !! NEXT RUN TRIGGER FAILED - cron will recover within 6h."
+    trigger_next || echo "[$(date)] فشل إطلاق الرن الأخير!"
 fi
 
 exit 0
