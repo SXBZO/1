@@ -1,4 +1,4 @@
-name: SXB Absolute 24-7 Broadcast
+name: SXB 24-7 Broadcast
 
 on:
   workflow_dispatch:
