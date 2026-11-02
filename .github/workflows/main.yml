@@ -1,71 +1,26 @@
-name: SXB Broadcast Relay
+name: Kick to Restream 24/7
 
 on:
   workflow_dispatch:
-
-permissions:
-  actions: write
-  contents: read
-
-concurrency:
-  group: sxb-broadcast
-  cancel-in-progress: false
+  schedule:
+    - cron: '0 */6 * * *'
 
 jobs:
-  broadcast:
+  stream:
     runs-on: ubuntu-latest
-    timeout-minutes: 355
+    timeout-minutes: 360
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install relay dependencies
-        shell: bash
+      - name: تثبيت ffmpeg و yt-dlp
         run: |
-          set -Eeuo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            ffmpeg curl ca-certificates fontconfig fonts-dejavu-core \
-            python3-pip libraqm0 libfribidi0
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          pip install -U yt-dlp
 
-          python3 -m pip install --user --break-system-packages \
-            --disable-pip-version-check --quiet --upgrade pillow streamlink
-
-          mkdir -p "$HOME/.fonts"
-          FONT_URL="https://raw.githubusercontent.com/google/fonts/main/ofl/cairo/Cairo%5Bslnt%2Cwght%5D.ttf"
-          if curl -fLsS --retry 2 --connect-timeout 10 --max-time 45 \
-              "$FONT_URL" -o "$HOME/.fonts/Cairo.ttf"; then
-            if [ "$(stat -c %s "$HOME/.fonts/Cairo.ttf")" -lt 20000 ]; then
-              rm -f "$HOME/.fonts/Cairo.ttf"
-            fi
-          fi
-          fc-cache -f >/dev/null 2>&1 || true
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-      - name: Schedule the next run
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPOSITORY: ${{ github.repository }}
-          REF_NAME: ${{ github.ref_name }}
+      - name: تشغيل سكربت البث
         run: |
-          set -Eeuo pipefail
-          nohup setsid bash -c '
-            sleep 19800
-            gh workflow run main.yml --repo "$REPOSITORY" --ref "$REF_NAME"
-          ' >/tmp/sxb-scheduler.log 2>&1 </dev/null &
-          echo "Next-run scheduler armed."
-
-      - name: Start SXB relay
-        shell: bash
-        env:
-          RESTREAM_KEY: ${{ secrets.RESTREAM_KEY }}
-          STREAMER: SXB
-          TITLE_AR: "توقف البث من شونق"
-          SUBTITLE_AR: "بث شونق سابثون 30 يوم!"
-          LOGO_URL: "https://a.top4top.io/p_394102x460.png"
-        run: |
-          set -Eeuo pipefail
           chmod +x stream.sh
           ./stream.sh
