@@ -2,25 +2,40 @@ name: Kick to Restream 24/7
 
 on:
   workflow_dispatch:
+  repository_dispatch:
+    types: [chain-trigger]
   schedule:
-    - cron: '0 */6 * * *'
+    - cron: '0 */6 * * *'   # احتياطي فقط، ليس المسار الأساسي
+
+permissions:
+  actions: write
+  contents: read
 
 jobs:
   stream:
     runs-on: ubuntu-latest
     timeout-minutes: 360
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: تثبيت ffmpeg و yt-dlp
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg jq
           pip install -U yt-dlp
 
-      - name: تشغيل سكربت البث
+      - name: Run watchdog
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          TRIGGER_TYPE: ${{ github.event_name }}
+          PARENT_RUN: ${{ github.event.client_payload.parent_run }}
+          KICK_CHANNEL: SXB
+          RESTREAM_KEY: ${{ secrets.RESTREAM_KEY }}
+          RESTREAM_URL: rtmp://live.restream.io/live
+          PLACEHOLDER_IMAGE: placeholder.png
         run: |
-          chmod +x stream.sh
-          ./stream.sh
+          chmod +x stream.sh watchdog.sh
+          ./watchdog.sh
