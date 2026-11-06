@@ -18,7 +18,7 @@ RESTREAM_URL="rtmp://live.restream.io/live/$RESTREAM_KEY"
 WORKDIR="/tmp/standby_sxb"
 mkdir -p "$WORKDIR"
 
-# 1. توليد شاشة الانتظار (سريع جداً)
+# 1. توليد شاشة الانتظار
 if [ ! -f "$WORKDIR/standby.ts" ]; then
     echo "🎨 تصميم شاشة الانتظار..."
     cat > /tmp/make_ui.py <<'PYEOF'
@@ -113,19 +113,14 @@ fi
 #  منطق التسليم والتسلّم (Handoff)
 # ═══════════════════════════════════════════════════
 echo "🔍 البحث عن رنات قديمة شغالة..."
-OLD_RUNS=$(gh run list --workflow="main.yml" --status=in_progress --json databaseId -q ".[].databaseId" 2>/dev/null | awk -v m="$GITHUB_RUN_ID" '$1 < m')
+OLD_RUNS=$(gh run list --workflow="main.yml" --status=in_progress --json databaseId --jq '.[].databaseId' 2>/dev/null | awk -v m="$GITHUB_RUN_ID" '$1 != m')
 
 if [ -n "$OLD_RUNS" ]; then
     echo "⚠️ يوجد رن قديم نشط: $OLD_RUNS"
-    echo "⏳ الرن الجديد جاهز. سيتم إيقاف الرن القديم الآن..."
-    
-    # إلغاء الرن القديم
     for R in $OLD_RUNS; do
-        timeout 8 gh run cancel "$R" 2>/dev/null
+        timeout 10 gh run cancel "$R" 2>/dev/null || true
     done
-    
-    # انتظار قصير حتى يتحرر اتصال Restream (3 ثوانٍ)
-    echo "⏳ انتظار 3 ثوانٍ لتحرير الاتصال..."
+    echo "⏳ انتظار 3 ثوانٍ لتحرير اتصال Restream..."
     sleep 3
 else
     echo "✅ لا يوجد رن قديم. بدء البث مباشرة."
@@ -161,7 +156,7 @@ echo "🚀 بدء المراقبة..."
 
 while true; do
     URL=$(timeout 10 streamlink --http-header "User-Agent=$UA" "https://kick.com/$STREAMER" best --stream-url 2>/dev/null | grep -m1 "^http")
-    
+
     if [ -n "$URL" ]; then
         stream_live
         echo "⚠️ انقطع البث. إعادة الفحص بعد 5 ثواني..."
@@ -171,4 +166,4 @@ while true; do
         echo "⚠️ شاشة الانتظار انقطعت. إعادة الفحص..."
         sleep 5
     fi
-done
+done 
