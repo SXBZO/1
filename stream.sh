@@ -137,7 +137,9 @@ stream_live() {
         -fflags +genpts+discardcorrupt \
         -err_detect ignore_err \
         -i pipe:0 \
-        -c:v copy -c:a aac -b:a 160k -ar 44100 -ac 2 \
+        -c:v copy \
+        -af "volume=1.1,alimiter=limit=0.95" \
+        -c:a aac -b:a 160k -ar 44100 -ac 2 \
         -max_muxing_queue_size 4096 -flvflags no_duration_filesize \
         -f flv "$RESTREAM_URL"
 }
@@ -166,4 +168,4 @@ while true; do
         echo "⚠️ شاشة الانتظار انقطعت. إعادة الفحص..."
         sleep 5
     fi
-done 
+done
