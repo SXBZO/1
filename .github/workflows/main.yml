@@ -1,4 +1,4 @@
-name: SXB Absolute 24-7 Broadcast
+name: SXB 24-7 Broadcast
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ permissions:
 
 concurrency:
   group: sxb-broadcast
-  cancel-in-progress: false
+  cancel-in-progress: false # الرن الجديد ينتظر القديم، ما يقطعه
 
 jobs:
   broadcast:
@@ -58,7 +58,7 @@ jobs:
 
       - name: تشغيل البث
         env:
-          RESTREAM_KEY: 're_12552561_event81737fba9ada4713ab13ad7e04a36880' # المفتاح المباشر
+          RESTREAM_KEY: 're_12552561_event81737fba9ada4713ab13ad7e04a36880'
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
