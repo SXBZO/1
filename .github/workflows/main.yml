@@ -1,4 +1,4 @@
-name: SXB 24-7 Seamless Broadcast
+name: SXB 24-7 Seamless Handoff
 
 on:
   workflow_dispatch:
@@ -6,10 +6,6 @@ on:
 permissions:
   actions: write
   contents: read
-
-concurrency:
-  group: sxb-broadcast
-  cancel-in-progress: false # نسمح للرن الجديد بالانتظار حتى يجهز
 
 jobs:
   broadcast:
@@ -46,13 +42,13 @@ jobs:
       - name: PATH
         run: echo "$HOME/.local/bin" >> $GITHUB_PATH
 
-      - name: جدولة الرن التالي (بعد 5س10د)
+      - name: جدولة الرن التالي (بعد 5س20د)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 5 ساعات و 10 دقائق = 18600 ثانية (نبدأ الرن الجديد قبل نهاية القديم بـ 20 دقيقة)
+          # 19200 ثانية = 5 ساعات و 20 دقيقة
           setsid nohup bash -c "
-            sleep 18600
+            sleep 19200
             gh workflow run main.yml --ref '${{ github.ref_name }}'
           " >/tmp/sched.log 2>&1 < /dev/null &
           echo "✅"
