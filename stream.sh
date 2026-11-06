@@ -2,7 +2,7 @@
 set +m
 
 # ═══════════════════════════════════════════════════
-#  SXB Broadcast — Simple & Stable (Zero-CPU)
+#  SXB Broadcast — Seamless Handoff (Zero-Gap Attempt)
 # ═══════════════════════════════════════════════════
 
 STREAMER="SXB"
@@ -18,7 +18,7 @@ RESTREAM_URL="rtmp://live.restream.io/live/$RESTREAM_KEY"
 WORKDIR="/tmp/standby_sxb"
 mkdir -p "$WORKDIR"
 
-# 1. توليد شاشة الانتظار
+# 1. توليد شاشة الانتظار (لتحضير الرن الجديد)
 if [ ! -f "$WORKDIR/standby.ts" ]; then
     echo "🎨 تصميم شاشة الانتظار..."
     cat > /tmp/make_ui.py <<'PYEOF'
@@ -111,31 +111,30 @@ PYEOF
 fi
 
 # ═══════════════════════════════════════════════════
-#  دوال البث
+#  منطق التسليم والتسلّم (Handoff)
 # ═══════════════════════════════════════════════════
-stream_live() {
-    echo "🔴 بث مباشر: $STREAMER (1080p60 Zero-CPU)"
-    streamlink --http-header "User-Agent=$UA" "https://kick.com/$STREAMER" best --stdout 2>/dev/null | \
-    ffmpeg -hide_banner -loglevel warning -nostdin \
-        -thread_queue_size 512 \
-        -fflags +genpts+discardcorrupt \
-        -err_detect ignore_err \
-        -i pipe:0 \
-        -c:v copy -c:a aac -b:a 160k -ar 44100 -ac 2 \
-        -max_muxing_queue_size 4096 -flvflags no_duration_filesize \
-        -f flv "$RESTREAM_URL"
-}
 
-stream_standby() {
-    echo "⏳ إرسال شاشة الانتظار..."
-    ffmpeg -hide_banner -loglevel warning -nostdin \
-        -re -stream_loop -1 -i "$WORKDIR/standby.ts" \
-        -c copy -f flv "$RESTREAM_URL"
-}
+# 1. التحقق إذا كان هناك رن آخر يبث حالياً (غير هذا الرن)
+echo "🔍 البحث عن رن نشط آخر..."
+OLD_RUNS=$(gh run list --workflow="main.yml" --status=in_progress --json databaseId -q ".[].databaseId" 2>/dev/null | awk -v m="$GITHUB_RUN_ID" '$1 < m')
 
-# ═══════════════════════════════════════════════════
-#  الحلقة الرئيسية
-# ═══════════════════════════════════════════════════
+if [ -n "$OLD_RUNS" ]; then
+    echo "⚠️ يوجد رن قديم نشط: $OLD_RUNS"
+    echo "⏳ الرن الجديد جاهز. سيتم إيقاف الرن القديم الآن..."
+    
+    # إلغاء الرن القديم
+    for R in $OLD_RUNS; do
+        timeout 8 gh run cancel "$R" 2>/dev/null
+    done
+    
+    # انتظار قصير حتى يتحرر اتصال Restream
+    echo "⏳ انتظار 3 ثوانٍ لتحرير الاتصال..."
+    sleep 3
+else
+    echo "✅ لا يوجد رن قديم. بدء البث مباشرة."
+fi
+
+# 2. بدء البث (مباشر أو شاشة انتظار)
 echo "🚀 بدء المراقبة..."
 
 while true; do
@@ -143,11 +142,23 @@ while true; do
     URL=$(timeout 10 streamlink --http-header "User-Agent=$UA" "https://kick.com/$STREAMER" best --stream-url 2>/dev/null | grep -m1 "^http")
     
     if [ -n "$URL" ]; then
-        stream_live
+        echo "🔴 بث مباشر: $STREAMER (1080p60 Zero-CPU)"
+        streamlink --http-header "User-Agent=$UA" "https://kick.com/$STREAMER" best --stdout 2>/dev/null | \
+        ffmpeg -hide_banner -loglevel warning -nostdin \
+            -thread_queue_size 512 \
+            -fflags +genpts+discardcorrupt \
+            -err_detect ignore_err \
+            -i pipe:0 \
+            -c:v copy -c:a aac -b:a 160k -ar 44100 -ac 2 \
+            -max_muxing_queue_size 4096 -flvflags no_duration_filesize \
+            -f flv "$RESTREAM_URL"
         echo "⚠️ انقطع البث. إعادة الفحص بعد 5 ثواني..."
         sleep 5
     else
-        stream_standby
+        echo "⏳ إرسال شاشة الانتظار..."
+        ffmpeg -hide_banner -loglevel warning -nostdin \
+            -re -stream_loop -1 -i "$WORKDIR/standby.ts" \
+            -c copy -f flv "$RESTREAM_URL"
         echo "⚠️ شاشة الانتظار انقطعت. إعادة الفحص..."
         sleep 5
     fi
