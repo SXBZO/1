@@ -2,7 +2,7 @@
 set +m
 
 # ═══════════════════════════════════════════════════
-#  SXB Broadcast — Seamless Handoff (Zero-Gap Attempt)
+#  SXB Broadcast — Infinite Handoff (3s Gap)
 # ═══════════════════════════════════════════════════
 
 STREAMER="SXB"
@@ -18,7 +18,7 @@ RESTREAM_URL="rtmp://live.restream.io/live/$RESTREAM_KEY"
 WORKDIR="/tmp/standby_sxb"
 mkdir -p "$WORKDIR"
 
-# 1. توليد شاشة الانتظار (لتحضير الرن الجديد)
+# 1. توليد شاشة الانتظار (سريع جداً)
 if [ ! -f "$WORKDIR/standby.ts" ]; then
     echo "🎨 تصميم شاشة الانتظار..."
     cat > /tmp/make_ui.py <<'PYEOF'
@@ -102,7 +102,6 @@ except Exception: pass
 bg.convert("RGB").save(f"{WORKDIR}/bg.png")
 PYEOF
     WORKDIR="$WORKDIR" STREAMER="$STREAMER" TITLE_AR="$TITLE_AR" SUBTITLE_AR="$SUBTITLE_AR" LOGO_URL="$LOGO_URL" python3 /tmp/make_ui.py
-    echo "🎬 ترميز شاشة الانتظار..."
     ffmpeg -y -hide_banner -loglevel warning -loop 1 -framerate 60 -i "$WORKDIR/bg.png" \
         -f lavfi -i "anullsrc=r=44100:cl=stereo" -t 4 \
         -c:v libx264 -preset ultrafast -pix_fmt yuv420p -g 120 -r 60 \
@@ -113,9 +112,7 @@ fi
 # ═══════════════════════════════════════════════════
 #  منطق التسليم والتسلّم (Handoff)
 # ═══════════════════════════════════════════════════
-
-# 1. التحقق إذا كان هناك رن آخر يبث حالياً (غير هذا الرن)
-echo "🔍 البحث عن رن نشط آخر..."
+echo "🔍 البحث عن رنات قديمة شغالة..."
 OLD_RUNS=$(gh run list --workflow="main.yml" --status=in_progress --json databaseId -q ".[].databaseId" 2>/dev/null | awk -v m="$GITHUB_RUN_ID" '$1 < m')
 
 if [ -n "$OLD_RUNS" ]; then
@@ -127,38 +124,50 @@ if [ -n "$OLD_RUNS" ]; then
         timeout 8 gh run cancel "$R" 2>/dev/null
     done
     
-    # انتظار قصير حتى يتحرر اتصال Restream
+    # انتظار قصير حتى يتحرر اتصال Restream (3 ثوانٍ)
     echo "⏳ انتظار 3 ثوانٍ لتحرير الاتصال..."
     sleep 3
 else
     echo "✅ لا يوجد رن قديم. بدء البث مباشرة."
 fi
 
-# 2. بدء البث (مباشر أو شاشة انتظار)
+# ═══════════════════════════════════════════════════
+#  دوال البث
+# ═══════════════════════════════════════════════════
+stream_live() {
+    echo "🔴 بث مباشر: $STREAMER (1080p60 Zero-CPU)"
+    streamlink --http-header "User-Agent=$UA" "https://kick.com/$STREAMER" best --stdout 2>/dev/null | \
+    ffmpeg -hide_banner -loglevel warning -nostdin \
+        -thread_queue_size 512 \
+        -fflags +genpts+discardcorrupt \
+        -err_detect ignore_err \
+        -i pipe:0 \
+        -c:v copy -c:a aac -b:a 160k -ar 44100 -ac 2 \
+        -max_muxing_queue_size 4096 -flvflags no_duration_filesize \
+        -f flv "$RESTREAM_URL"
+}
+
+stream_standby() {
+    echo "⏳ إرسال شاشة الانتظار..."
+    ffmpeg -hide_banner -loglevel warning -nostdin \
+        -re -stream_loop -1 -i "$WORKDIR/standby.ts" \
+        -c copy -f flv "$RESTREAM_URL"
+}
+
+# ═══════════════════════════════════════════════════
+#  الحلقة الرئيسية
+# ═══════════════════════════════════════════════════
 echo "🚀 بدء المراقبة..."
 
 while true; do
-    echo "🔍 فحص حالة شونق..."
     URL=$(timeout 10 streamlink --http-header "User-Agent=$UA" "https://kick.com/$STREAMER" best --stream-url 2>/dev/null | grep -m1 "^http")
     
     if [ -n "$URL" ]; then
-        echo "🔴 بث مباشر: $STREAMER (1080p60 Zero-CPU)"
-        streamlink --http-header "User-Agent=$UA" "https://kick.com/$STREAMER" best --stdout 2>/dev/null | \
-        ffmpeg -hide_banner -loglevel warning -nostdin \
-            -thread_queue_size 512 \
-            -fflags +genpts+discardcorrupt \
-            -err_detect ignore_err \
-            -i pipe:0 \
-            -c:v copy -c:a aac -b:a 160k -ar 44100 -ac 2 \
-            -max_muxing_queue_size 4096 -flvflags no_duration_filesize \
-            -f flv "$RESTREAM_URL"
+        stream_live
         echo "⚠️ انقطع البث. إعادة الفحص بعد 5 ثواني..."
         sleep 5
     else
-        echo "⏳ إرسال شاشة الانتظار..."
-        ffmpeg -hide_banner -loglevel warning -nostdin \
-            -re -stream_loop -1 -i "$WORKDIR/standby.ts" \
-            -c copy -f flv "$RESTREAM_URL"
+        stream_standby
         echo "⚠️ شاشة الانتظار انقطعت. إعادة الفحص..."
         sleep 5
     fi
